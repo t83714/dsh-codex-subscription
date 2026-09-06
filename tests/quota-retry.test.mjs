@@ -1,21 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-let createHandler
-try {
-  const module = await import('../src/quota-retry.js')
-  createHandler = module.createCodexQuotaRetryHandler
-} catch {
-  createHandler = undefined
-}
-
-// Keep the RED phase as an assertion failure rather than an import error. Once
-// the helper exists, the behavior cases below become active automatically.
-test('quota-aware retry helper is part of the plugin runtime', () => {
-  assert.equal(typeof createHandler, 'function')
-})
-
-const quotaTest = typeof createHandler === 'function' ? test : test.skip
+import { createCodexQuotaRetryHandler as createHandler } from '../src/quota-retry.js'
 
 const payload = ({
   provider = 'openai-codex',
@@ -23,7 +9,7 @@ const payload = ({
   signal = new AbortController().signal,
 } = {}) => ({ provider, failure: { code }, signal })
 
-quotaTest('recoverable short Codex quota waits through reset then retries without delegating', async () => {
+test('recoverable short Codex quota waits through reset then retries without delegating', async () => {
   const nowMs = 1_000_000
   const reads = []
   const waits = []
@@ -68,7 +54,36 @@ quotaTest('recoverable short Codex quota waits through reset then retries withou
   assert.equal(delegated, 0)
 })
 
-quotaTest('weekly quota is never parked even when its reset happens within six hours', async () => {
+test('unrelated exhausted feature quotas do not park a model turn', async () => {
+  const nowMs = 1_000_000
+  let waited = false
+  const handler = createHandler({
+    now: () => nowMs,
+    usageReader: {
+      async read() {
+        return {
+          rateLimits: [{
+            id: 'codex',
+            windows: [{ usedPercent: 50, windowSeconds: 18_000, resetsAt: (nowMs + 60_000) / 1_000 }],
+          }, {
+            id: 'code_review',
+            windows: [{ usedPercent: 100, windowSeconds: 3_600, resetsAt: (nowMs + 60_000) / 1_000 }],
+          }],
+        }
+      },
+    },
+    wait: async () => {
+      waited = true
+      return true
+    },
+  })
+
+  const sentinel = { kind: 'downstream' }
+  assert.equal(await handler(payload(), async () => sentinel), sentinel)
+  assert.equal(waited, false)
+})
+
+test('weekly quota is never parked even when its reset happens within six hours', async () => {
   const nowMs = 1_000_000
   let waited = false
   let delegated = 0
@@ -106,7 +121,7 @@ quotaTest('weekly quota is never parked even when its reset happens within six h
   assert.equal(delegated, 1)
 })
 
-quotaTest('short-window reset beyond the bounded wait falls through', async () => {
+test('short-window reset beyond the bounded wait falls through', async () => {
   const nowMs = 1_000_000
   let waited = false
   const handler = createHandler({
@@ -138,7 +153,47 @@ quotaTest('short-window reset beyond the bounded wait falls through', async () =
   assert.equal(waited, false)
 })
 
-quotaTest('non-Codex and non-rate-limit failures remain owned by downstream recovery', async () => {
+test('maximum wait includes the reset safety margin', async () => {
+  const nowMs = 1_000_000
+  const maxWaitMs = 60_000
+  const waits = []
+  const usageReader = resetDelayMs => ({
+    async read() {
+      return {
+        rateLimits: [{
+          id: 'codex',
+          windows: [{
+            usedPercent: 100,
+            windowSeconds: 60,
+            resetsAt: (nowMs + resetDelayMs) / 1_000,
+          }],
+        }],
+      }
+    },
+  })
+  const next = async () => ({ kind: 'downstream' })
+
+  const beyond = createHandler({
+    usageReader: usageReader(maxWaitMs - 5_000),
+    now: () => nowMs,
+    maxWaitMs,
+    resetMarginMs: 10_000,
+    wait: async delayMs => { waits.push(delayMs); return true },
+  })
+  assert.deepEqual(await beyond(payload(), next), { kind: 'downstream' })
+
+  const boundary = createHandler({
+    usageReader: usageReader(maxWaitMs - 10_000),
+    now: () => nowMs,
+    maxWaitMs,
+    resetMarginMs: 10_000,
+    wait: async delayMs => { waits.push(delayMs); return true },
+  })
+  assert.deepEqual(await boundary(payload(), next), { kind: 'retry' })
+  assert.deepEqual(waits, [maxWaitMs])
+})
+
+test('non-Codex and non-rate-limit failures remain owned by downstream recovery', async () => {
   let reads = 0
   const handler = createHandler({
     usageReader: {
@@ -159,7 +214,7 @@ quotaTest('non-Codex and non-rate-limit failures remain owned by downstream reco
   assert.equal(delegated, 2)
 })
 
-quotaTest('usage refresh failures preserve the original rate-limit failure path', async () => {
+test('usage refresh failures preserve the original rate-limit failure path', async () => {
   const handler = createHandler({
     usageReader: {
       async read() { throw new Error('usage unavailable') },
@@ -171,7 +226,60 @@ quotaTest('usage refresh failures preserve the original rate-limit failure path'
   assert.equal(await handler(payload(), async () => sentinel), sentinel)
 })
 
-quotaTest('cancellation during a parked quota wait suppresses the retry', async () => {
+test('successful recovery clears only the volatile quota cache when available', async () => {
+  const nowMs = 1_000_000
+  const clears = []
+  const handler = createHandler({
+    now: () => nowMs,
+    usageReader: {
+      async read() {
+        return {
+          rateLimits: [{
+            id: 'codex',
+            windows: [{
+              usedPercent: 100,
+              windowSeconds: 18_000,
+              resetsAt: (nowMs + 60_000) / 1_000,
+            }],
+          }],
+        }
+      },
+      clearCache() { clears.push('cache') },
+      clear() { clears.push('persistent') },
+    },
+    wait: async () => true,
+  })
+
+  assert.deepEqual(await handler(payload(), async () => undefined), { kind: 'retry' })
+  assert.deepEqual(clears, ['cache'])
+})
+
+test('cache cleanup failures do not suppress retry after the completed wait', async () => {
+  const nowMs = 1_000_000
+  const handler = createHandler({
+    now: () => nowMs,
+    usageReader: {
+      async read() {
+        return {
+          rateLimits: [{
+            id: 'codex',
+            windows: [{
+              usedPercent: 100,
+              windowSeconds: 18_000,
+              resetsAt: (nowMs + 60_000) / 1_000,
+            }],
+          }],
+        }
+      },
+      async clear() { throw new Error('state store unavailable') },
+    },
+    wait: async () => true,
+  })
+
+  assert.deepEqual(await handler(payload(), async () => undefined), { kind: 'retry' })
+})
+
+test('cancellation during a parked quota wait suppresses the retry', async () => {
   const nowMs = 1_000_000
   let delegated = 0
   let clears = 0

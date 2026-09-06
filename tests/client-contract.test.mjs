@@ -76,6 +76,7 @@ test('composer quota modes use the public composer slot before the model selecto
   assert.doesNotMatch(client, /onPointerDown|onMouseDown|onContextMenu/u)
   assert.doesNotMatch(client, /localStorage|sessionStorage/u)
   assert.match(host, /export const inject = \[[^\]]*['"]settings['"]/u)
+  assert.match(host, /export const inject = \[[^\]]*['"]agents['"]/u)
   assert.match(host, /ctx\.settings\.register/u)
   assert.match(host, /settings\.watch/u)
   assert.match(host, /preferences\/status/u)

@@ -81,6 +81,7 @@ test('custom context rows follow the active upstream model catalog', () => {
 function fakeContext({ connection = true } = {}) {
   const registered = []
   const handled = []
+  const listeners = []
   const searchProviders = []
   const tools = []
   const settings = []
@@ -166,12 +167,20 @@ function fakeContext({ connection = true } = {}) {
     inject(services, callback) {
       if (services.every(service => ctx[service] !== undefined)) callback(ctx)
     },
+    on(event, listener) {
+      const entry = { event, listener }
+      listeners.push(entry)
+      return () => {
+        const index = listeners.indexOf(entry)
+        if (index >= 0) listeners.splice(index, 1)
+      }
+    },
     get(name) { return provided.get(name) },
     provide(name, value) { provided.set(name, value) },
     effect(register) { return register() },
   }
   return {
-    ctx, registered, handled, provided, searchProviders, settings, tools, webUpdates,
+    ctx, registered, handled, listeners, provided, searchProviders, settings, tools, webUpdates,
     async updateSettings(patch) {
       const previous = preference
       preference = { ...preference, ...patch }
@@ -206,6 +215,13 @@ test('plugin registers one Codex route, subscription image tool, and DSH-trusted
   })
   assert.deepEqual(host.searchProviders.map(provider => provider.id), ['codex-subscription', 'codex-subscription-auto'])
   assert.deepEqual(host.tools.map(tool => tool.name), ['codex_image_generate'])
+  assert.deepEqual(host.listeners.map(listener => listener.event), ['agent/request-error'])
+  const downstream = { kind: 'downstream' }
+  assert.equal(await host.listeners[0].listener({
+    provider: 'other',
+    failure: { code: 'RATE_LIMIT' },
+    signal: new AbortController().signal,
+  }, async () => downstream), downstream)
   assert.equal(host.registered[0].adapter.providerRetryPolicy(), undefined)
   const models = await host.registered[0].adapter.listModels('openai-codex')
   assert.ok(models.length > 0, 'the supported DSH adapter must receive auth before creating its model registry')

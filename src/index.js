@@ -60,12 +60,13 @@ import {
   normalizeCustomContextWindow,
 } from './settings-contract.js'
 import { createCodexUsageReader } from './usage.js'
+import { createCodexQuotaRetryHandler } from './quota-retry.js'
 import { createQuotaForecastReader } from './quota-forecast.js'
 import { QuotaForecastStateStore } from './quota-forecast-store.js'
 import { createCodexResetCreditService } from './reset-credits.js'
 
 export const name = 'codex-subscription'
-export const inject = ['llm', 'credentials', 'settings', 'web', 'loader', 'tools', 'attachments']
+export const inject = ['llm', 'credentials', 'settings', 'web', 'loader', 'tools', 'attachments', 'agents']
 
 const PROVIDER = 'openai-codex'
 const OAUTH_EXPIRY_SKEW_MS = 60_000
@@ -457,6 +458,24 @@ export function apply(ctx) {
       filename: dshHomePath('state', 'codex-subscription', 'quota-forecast.json'),
     }),
   })
+  const quotaRetryLifetime = new AbortController()
+  const activeQuotaRetries = new Set()
+  const quotaRetryHandler = createCodexQuotaRetryHandler({ usageReader })
+  const disposeQuotaRetry = ctx.on('agent/request-error', (payload, next) => {
+    if (quotaRetryLifetime.signal.aborted) return Promise.resolve(undefined)
+    const signal = payload.signal === undefined
+      ? quotaRetryLifetime.signal
+      : AbortSignal.any([payload.signal, quotaRetryLifetime.signal])
+    const operation = quotaRetryHandler({ ...payload, signal }, next)
+    const tracked = operation.finally(() => activeQuotaRetries.delete(tracked))
+    activeQuotaRetries.add(tracked)
+    return tracked
+  })
+  ctx.effect(() => async () => {
+    disposeQuotaRetry()
+    quotaRetryLifetime.abort(new Error('codex-subscription quota retry disposed'))
+    await Promise.allSettled([...activeQuotaRetries])
+  }, 'codex-subscription: abort and drain quota recovery')
   ctx.effect(() => {
     const warmForecast = value => {
       if (normalizeQuickQuotaMode(value[QUICK_QUOTA_MODE_FIELD], value[LEGACY_QUICK_QUOTA_FIELD]) !== QUICK_QUOTA_MODE_FORECAST) return
@@ -501,6 +520,7 @@ export { normalizeContextMode, normalizeCustomContextWindow } from './settings-c
 export { assertCodexAuthUrl, commandForCodexAuthUrl, openCodexAuthUrl } from './external-url.js'
 export { CodexLoginCoordinator, createCodexRpcHandler } from './login-coordinator.js'
 export { CODEX_USAGE_URL, createCodexUsageReader, parseCodexUsage } from './usage.js'
+export { createCodexQuotaRetryHandler } from './quota-retry.js'
 export {
   CODEX_RESET_CONSUME_URL,
   CODEX_RESET_CREDITS_URL,
