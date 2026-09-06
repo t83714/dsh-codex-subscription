@@ -1,9 +1,13 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import * as plugin from '../src/index.js'
-
-const createHandler = plugin.createCodexQuotaRetryHandler
+let createHandler
+try {
+  const module = await import('../src/quota-retry.js')
+  createHandler = module.createCodexQuotaRetryHandler
+} catch {
+  createHandler = undefined
+}
 
 // Keep the RED phase as an assertion failure rather than an import error. Once
 // the helper exists, the behavior cases below become active automatically.
