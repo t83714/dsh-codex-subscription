@@ -1,6 +1,15 @@
 const DEFAULT_MAX_WAIT_MS = 6 * 60 * 60 * 1000
 const DEFAULT_RESET_MARGIN_MS = 10_000
 const EXHAUSTED_PERCENT = 99.9
+// pi-ai converts Codex's usage_limit_reached response into this bounded friendly
+// message. DSH releases through 0.1.2-rc.1 classify that text as PI_AI_ERROR
+// because their generic classifier recognizes "rate limit", but not "usage limit".
+const CODEX_USAGE_LIMIT_MESSAGE = /^You have hit your ChatGPT usage limit(?: \([a-z0-9][a-z0-9 ._-]{0,39} plan\))?\.(?: Try again in ~\d{1,6} min\.)?$/u
+
+const isCodexRateLimit = failure => failure?.code === 'RATE_LIMIT'
+  || (failure?.code === 'PI_AI_ERROR'
+    && typeof failure.message === 'string'
+    && CODEX_USAGE_LIMIT_MESSAGE.test(failure.message))
 
 function cancellableDelay(delayMs, signal) {
   if (signal?.aborted) return Promise.resolve(false)
@@ -63,7 +72,7 @@ export function createCodexQuotaRetryHandler({
     throw new TypeError('quota retry requires a positive wait cap and non-negative reset margin')
   }
   return async ({ provider: requestProvider, failure, signal }, next) => {
-    if (requestProvider !== provider || failure?.code !== 'RATE_LIMIT') return next()
+    if (requestProvider !== provider || !isCodexRateLimit(failure)) return next()
     if (signal?.aborted) return undefined
 
     let usage

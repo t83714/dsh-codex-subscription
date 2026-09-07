@@ -6,8 +6,9 @@ import { createCodexQuotaRetryHandler as createHandler } from '../src/quota-retr
 const payload = ({
   provider = 'openai-codex',
   code = 'RATE_LIMIT',
+  message,
   signal = new AbortController().signal,
-} = {}) => ({ provider, failure: { code }, signal })
+} = {}) => ({ provider, failure: { code, ...(message === undefined ? {} : { message }) }, signal })
 
 test('recoverable short Codex quota waits through reset then retries without delegating', async () => {
   const nowMs = 1_000_000
@@ -52,6 +53,43 @@ test('recoverable short Codex quota waits through reset then retries without del
   assert.deepEqual(waits, [{ delayMs: 70_000, signal }])
   assert.equal(clears, 1)
   assert.equal(delegated, 0)
+})
+
+test('Codex native usage-limit message recovers across affected DSH classifiers', async () => {
+  const nowMs = 1_000_000
+  let reads = 0
+  let waited = 0
+  const handler = createHandler({
+    now: () => nowMs,
+    usageReader: {
+      async read() {
+        reads += 1
+        return {
+          rateLimits: [{
+            id: 'codex',
+            windows: [{
+              usedPercent: 100,
+              windowSeconds: 18_000,
+              resetsAt: (nowMs + 60_000) / 1_000,
+            }],
+          }],
+        }
+      },
+    },
+    wait: async delayMs => {
+      waited = delayMs
+      return true
+    },
+  })
+
+  const result = await handler(payload({
+    code: 'PI_AI_ERROR',
+    message: 'You have hit your ChatGPT usage limit (team plan). Try again in ~237 min.',
+  }), async () => ({ kind: 'downstream' }))
+
+  assert.deepEqual(result, { kind: 'retry' })
+  assert.equal(reads, 1)
+  assert.equal(waited, 70_000)
 })
 
 test('unrelated exhausted feature quotas do not park a model turn', async () => {
@@ -210,8 +248,10 @@ test('non-Codex and non-rate-limit failures remain owned by downstream recovery'
 
   assert.deepEqual(await handler(payload({ provider: 'other' }), next), { kind: 'downstream' })
   assert.deepEqual(await handler(payload({ code: 'AUTH_FAILED' }), next), { kind: 'downstream' })
+  assert.deepEqual(await handler(payload({ code: 'PI_AI_ERROR', message: 'generic provider failure' }), next), { kind: 'downstream' })
+  assert.deepEqual(await handler(payload({ code: 'PI_AI_ERROR', message: 'You have hit your ChatGPT usage limit, maybe.' }), next), { kind: 'downstream' })
   assert.equal(reads, 0)
-  assert.equal(delegated, 2)
+  assert.equal(delegated, 4)
 })
 
 test('usage refresh failures preserve the original rate-limit failure path', async () => {
