@@ -1,10 +1,12 @@
 import {
+  AUTO_QUOTA_RETRY_FIELD,
   CONTEXT_MODE_FIELD,
   CUSTOM_CONTEXT_MODEL_CAPS,
   CUSTOM_CONTEXT_MODEL_DEFAULTS,
   CUSTOM_CONTEXT_MODEL_FIELDS,
   CUSTOM_CONTEXT_WINDOW_FIELD,
   LEGACY_QUICK_QUOTA_FIELD,
+  normalizeAutoQuotaRetry,
   normalizeContextMode,
   normalizeCustomContextWindow,
   normalizeOutputVerbosity,
@@ -46,6 +48,7 @@ export function createPreferenceController(scope, rpc) {
     return Object.freeze({
       // Keep accepted ready surfaces mounted while a Host write is pending.
       status: current.status,
+      autoQuotaRetry: normalizeAutoQuotaRetry(value?.[AUTO_QUOTA_RETRY_FIELD]),
       quickQuotaMode: normalizeQuickQuotaMode(
         value?.[QUICK_QUOTA_MODE_FIELD],
         value?.[LEGACY_QUICK_QUOTA_FIELD],
@@ -81,6 +84,7 @@ export function createPreferenceController(scope, rpc) {
     fallback = {
       status: 'ready',
       value: {
+        [AUTO_QUOTA_RETRY_FIELD]: normalizeAutoQuotaRetry(value?.[AUTO_QUOTA_RETRY_FIELD]),
         [QUICK_QUOTA_MODE_FIELD]: normalizeQuickQuotaMode(
           value?.[QUICK_QUOTA_MODE_FIELD],
           value?.[LEGACY_QUICK_QUOTA_FIELD],

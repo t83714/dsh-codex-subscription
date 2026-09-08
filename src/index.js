@@ -21,6 +21,7 @@ import { OriginalImageStore } from './image-original-store.js'
 import { inheritedOriginalImageRef, ORIGINAL_IMAGE_CHUNK_BYTES, ORIGINAL_IMAGE_ID_PATTERN } from './image-original-contract.js'
 import { createSubscriptionDiagnostics } from './diagnostics.js'
 import {
+  AUTO_QUOTA_RETRY_FIELD,
   CONTEXT_MODE_CUSTOM,
   CONTEXT_MODE_EXTENDED,
   CONTEXT_MODE_FIELD,
@@ -30,10 +31,12 @@ import {
   CUSTOM_CONTEXT_MODEL_DEFAULTS,
   CUSTOM_CONTEXT_MODEL_FIELDS,
   CUSTOM_CONTEXT_WINDOW_FIELD,
+  DEFAULT_AUTO_QUOTA_RETRY,
   DEFAULT_CONTEXT_MODE,
   DEFAULT_CUSTOM_CONTEXT_WINDOW,
   DEFAULT_OUTPUT_VERBOSITY,
   LEGACY_QUICK_QUOTA_FIELD,
+  normalizeAutoQuotaRetry,
   normalizeQuickQuotaMode,
   normalizeOutputVerbosity,
   DEFAULT_SEARCH_PROVIDER,
@@ -60,12 +63,13 @@ import {
   normalizeCustomContextWindow,
 } from './settings-contract.js'
 import { createCodexUsageReader } from './usage.js'
+import { createCodexQuotaRetryHandler } from './quota-retry.js'
 import { createQuotaForecastReader } from './quota-forecast.js'
 import { QuotaForecastStateStore } from './quota-forecast-store.js'
 import { createCodexResetCreditService } from './reset-credits.js'
 
 export const name = 'codex-subscription'
-export const inject = ['llm', 'credentials', 'settings', 'web', 'loader', 'tools', 'attachments']
+export const inject = ['llm', 'credentials', 'settings', 'web', 'loader', 'tools', 'attachments', 'agents']
 
 const PROVIDER = 'openai-codex'
 const OAUTH_EXPIRY_SKEW_MS = 60_000
@@ -86,7 +90,7 @@ const publicError = (code, message) => ({
   error: { code, message, details: { issues: [] } },
 })
 
-export function createSubscriptionRpcHandler({ authHandler, usageReader, resetCreditService, preferences, diagnosticsReader, modelCatalog, originalImages, resolveInheritedOriginal }) {
+export function createSubscriptionRpcHandler({ authHandler, usageReader, resetCreditService, preferences, diagnosticsReader, modelCatalog, originalImages, resolveInheritedOriginal, onAccountSelected }) {
   return async (endpoint, payload, signal) => {
     if (endpoint === 'image/original/chunk') {
       try {
@@ -119,6 +123,12 @@ export function createSubscriptionRpcHandler({ authHandler, usageReader, resetCr
         signal.throwIfAborted()
         if (endpoint === 'preferences/update') {
           const patch = {}
+          if (Object.hasOwn(payload ?? {}, AUTO_QUOTA_RETRY_FIELD)) {
+            if (typeof payload[AUTO_QUOTA_RETRY_FIELD] !== 'boolean') {
+              return publicError('internal', 'Invalid automatic quota retry preference')
+            }
+            patch[AUTO_QUOTA_RETRY_FIELD] = payload[AUTO_QUOTA_RETRY_FIELD]
+          }
           if (Object.hasOwn(payload ?? {}, QUICK_QUOTA_MODE_FIELD)) {
             if (![QUICK_QUOTA_MODE_OFF, QUICK_QUOTA_MODE_PERCENT, QUICK_QUOTA_MODE_BAR, QUICK_QUOTA_MODE_FORECAST].includes(payload[QUICK_QUOTA_MODE_FIELD])) {
               return publicError('internal', 'Invalid quick quota preference')
@@ -239,6 +249,7 @@ export function createSubscriptionRpcHandler({ authHandler, usageReader, resetCr
       resetCreditService.clear()
       modelCatalog?.clear()
       void modelCatalog?.refresh({ signal: undefined }).catch(() => {})
+      if (endpoint === 'account/select') onAccountSelected?.()
     } else if (result.ok === true && (endpoint === 'status' || result.value?.authenticated === true)) {
       void modelCatalog?.refresh({ signal: undefined }).catch(() => {})
     }
@@ -278,6 +289,7 @@ export function createSearchProviderSwitcher(loader) {
 
 export function apply(ctx) {
   const settings = ctx.settings.register(SETTINGS_NAMESPACE, z.object({
+    [AUTO_QUOTA_RETRY_FIELD]: z.boolean().default(DEFAULT_AUTO_QUOTA_RETRY),
     [QUICK_QUOTA_MODE_FIELD]: z.union([QUICK_QUOTA_MODE_OFF, QUICK_QUOTA_MODE_PERCENT, QUICK_QUOTA_MODE_BAR, QUICK_QUOTA_MODE_FORECAST]),
     [LEGACY_QUICK_QUOTA_FIELD]: z.boolean(),
     [SEARCH_PROVIDER_FIELD]: z.union([SEARCH_PROVIDER_AUTO, SEARCH_PROVIDER_DSH, SEARCH_PROVIDER_CODEX]).default(DEFAULT_SEARCH_PROVIDER),
@@ -325,6 +337,7 @@ export function apply(ctx) {
   })
   const preferences = {
     status: () => ({
+      [AUTO_QUOTA_RETRY_FIELD]: normalizeAutoQuotaRetry(settings.get()[AUTO_QUOTA_RETRY_FIELD]),
       [QUICK_QUOTA_MODE_FIELD]: normalizeQuickQuotaMode(
         settings.get()[QUICK_QUOTA_MODE_FIELD],
         settings.get()[LEGACY_QUICK_QUOTA_FIELD],
@@ -457,6 +470,31 @@ export function apply(ctx) {
       filename: dshHomePath('state', 'codex-subscription', 'quota-forecast.json'),
     }),
   })
+  const quotaRetryLifetime = new AbortController()
+  const activeQuotaRetries = new Set()
+  const quotaRetryEnabled = () => normalizeAutoQuotaRetry(settings.get()[AUTO_QUOTA_RETRY_FIELD])
+  const quotaRetryHandler = createCodexQuotaRetryHandler({ usageReader, enabled: quotaRetryEnabled })
+  const disposeQuotaRetry = ctx.on('agent/request-error', (payload, next) => {
+    if (quotaRetryLifetime.signal.aborted) return Promise.resolve(undefined)
+    const signal = payload.signal === undefined
+      ? quotaRetryLifetime.signal
+      : AbortSignal.any([payload.signal, quotaRetryLifetime.signal])
+    const operation = quotaRetryHandler({ ...payload, signal }, next)
+    const tracked = operation.finally(() => activeQuotaRetries.delete(tracked))
+    activeQuotaRetries.add(tracked)
+    return tracked
+  })
+  ctx.effect(() => async () => {
+    disposeQuotaRetry()
+    quotaRetryLifetime.abort(new Error('codex-subscription quota retry disposed'))
+    await Promise.allSettled([...activeQuotaRetries])
+  }, 'codex-subscription: abort and drain quota recovery')
+  ctx.effect(() => settings.watch((value, previous) => {
+    if (normalizeAutoQuotaRetry(value[AUTO_QUOTA_RETRY_FIELD])
+      !== normalizeAutoQuotaRetry(previous?.[AUTO_QUOTA_RETRY_FIELD])) {
+      quotaRetryHandler.notifyConfigurationChanged()
+    }
+  }), 'codex-subscription: update quota recovery preference')
   ctx.effect(() => {
     const warmForecast = value => {
       if (normalizeQuickQuotaMode(value[QUICK_QUOTA_MODE_FIELD], value[LEGACY_QUICK_QUOTA_FIELD]) !== QUICK_QUOTA_MODE_FORECAST) return
@@ -479,6 +517,7 @@ export function apply(ctx) {
     diagnosticsReader: () => createSubscriptionDiagnostics({ auth, preferences, login: coordinator.supportState(), network }),
     modelCatalog,
     originalImages,
+    onAccountSelected: quotaRetryHandler.notifyAccountChanged,
     resolveInheritedOriginal: (sessionId, assetId) => inheritedOriginalImageRef(
       ctx.get?.('sessions')?.get?.(sessionId),
       assetId,
@@ -501,6 +540,7 @@ export { normalizeContextMode, normalizeCustomContextWindow } from './settings-c
 export { assertCodexAuthUrl, commandForCodexAuthUrl, openCodexAuthUrl } from './external-url.js'
 export { CodexLoginCoordinator, createCodexRpcHandler } from './login-coordinator.js'
 export { CODEX_USAGE_URL, createCodexUsageReader, parseCodexUsage } from './usage.js'
+export { createCodexQuotaRetryHandler } from './quota-retry.js'
 export {
   CODEX_RESET_CONSUME_URL,
   CODEX_RESET_CREDITS_URL,

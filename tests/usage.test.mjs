@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
+import './quota-retry.test.mjs'
 import { createCodexUsageReader, parseCodexUsage } from '../src/usage.js'
 
 test('usage parser returns secret-free remaining quota windows and exact disclosed balances', () => {
