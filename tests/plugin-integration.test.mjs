@@ -4,6 +4,7 @@ import test from 'node:test'
 import * as plugin from '../src/index.js'
 import { PACKAGE_VERSION } from '../src/version.js'
 import {
+  AUTO_QUOTA_RETRY_FIELD,
   CONTEXT_MODE_CUSTOM,
   CONTEXT_MODE_EXTENDED,
   CONTEXT_MODE_STANDARD,
@@ -12,6 +13,7 @@ import {
   CUSTOM_CONTEXT_WINDOW_FIELD,
   CONTEXT_MODE_FIELD,
   formatContextWindow,
+  normalizeAutoQuotaRetry,
   normalizeQuickQuotaMode,
   normalizeSearchProvider,
   parseContextWindow,
@@ -31,6 +33,9 @@ import {
 const { apply: applyPlugin } = plugin
 
 test('composer quota mode normalizes formal values and legacy booleans', () => {
+  assert.equal(normalizeAutoQuotaRetry(undefined), true)
+  assert.equal(normalizeAutoQuotaRetry(false), false)
+  assert.equal(normalizeAutoQuotaRetry('false'), true)
   assert.equal(normalizeQuickQuotaMode(QUICK_QUOTA_MODE_OFF), QUICK_QUOTA_MODE_OFF)
   assert.equal(normalizeQuickQuotaMode(QUICK_QUOTA_MODE_PERCENT), QUICK_QUOTA_MODE_PERCENT)
   assert.equal(normalizeQuickQuotaMode(QUICK_QUOTA_MODE_BAR), QUICK_QUOTA_MODE_BAR)
@@ -87,7 +92,7 @@ function fakeContext({ connection = true } = {}) {
   const settings = []
   const webUpdates = []
   const provided = new Map()
-  let preference = { quickQuotaVisible: false, searchProvider: SEARCH_PROVIDER_AUTO, outputVerbosity: OUTPUT_VERBOSITY_DEFAULT, speedMode: SPEED_MODE_STANDARD, contextMode: CONTEXT_MODE_STANDARD, customContextWindow: 272_000, customContextGpt54: 1_000_000, customContextGpt54Mini: 400_000, customContextGpt55: 1_000_000, customContextGpt56: 1_000_000 }
+  let preference = { autoQuotaRetry: true, quickQuotaVisible: false, searchProvider: SEARCH_PROVIDER_AUTO, outputVerbosity: OUTPUT_VERBOSITY_DEFAULT, speedMode: SPEED_MODE_STANDARD, contextMode: CONTEXT_MODE_STANDARD, customContextWindow: 272_000, customContextGpt54: 1_000_000, customContextGpt54Mini: 400_000, customContextGpt55: 1_000_000, customContextGpt56: 1_000_000 }
   const preferenceWatchers = new Set()
   let credential
   const webEntry = {
@@ -259,6 +264,7 @@ test('plugin registers one Codex route, subscription image tool, and DSH-trusted
       login: { phase: 'idle' },
       requests: {},
       configuration: {
+        autoQuotaRetry: true,
         contextMode: CONTEXT_MODE_STANDARD,
         quickQuotaMode: QUICK_QUOTA_MODE_OFF,
         outputVerbosity: OUTPUT_VERBOSITY_DEFAULT,
@@ -296,9 +302,10 @@ test('plugin registers one Codex route, subscription image tool, and DSH-trusted
   const verbosityModels = ['gpt-5.4', 'gpt-5.4-mini', 'gpt-5.5', 'gpt-5.6-luna', 'gpt-5.6-sol', 'gpt-5.6-terra']
   assert.deepEqual(preferenceStatus, {
     ok: true,
-    value: { quickQuotaMode: QUICK_QUOTA_MODE_PERCENT, searchProvider: 'codex', speedMode: SPEED_MODE_STANDARD, outputVerbosity: OUTPUT_VERBOSITY_DEFAULT, contextMode: CONTEXT_MODE_STANDARD, customContextWindow: 272_000, customContextGpt54: 272_000, customContextGpt54Mini: 272_000, customContextGpt55: 272_000, customContextGpt56: 272_000, contextModels: activeContextModels, verbosityModels, writable: true },
+    value: { autoQuotaRetry: true, quickQuotaMode: QUICK_QUOTA_MODE_PERCENT, searchProvider: 'codex', speedMode: SPEED_MODE_STANDARD, outputVerbosity: OUTPUT_VERBOSITY_DEFAULT, contextMode: CONTEXT_MODE_STANDARD, customContextWindow: 272_000, customContextGpt54: 272_000, customContextGpt54Mini: 272_000, customContextGpt55: 272_000, customContextGpt56: 272_000, contextModels: activeContextModels, verbosityModels, writable: true },
   })
   const preferenceUpdate = await host.handled[0].handler('preferences/update', {
+    [AUTO_QUOTA_RETRY_FIELD]: false,
     quickQuotaMode: QUICK_QUOTA_MODE_BAR,
     searchProvider: 'dsh',
     speedMode: SPEED_MODE_FAST,
@@ -308,7 +315,7 @@ test('plugin registers one Codex route, subscription image tool, and DSH-trusted
   }, signal)
   assert.deepEqual(preferenceUpdate, {
     ok: true,
-    value: { quickQuotaMode: QUICK_QUOTA_MODE_BAR, searchProvider: 'dsh', speedMode: SPEED_MODE_FAST, outputVerbosity: OUTPUT_VERBOSITY_DEFAULT, contextMode: CONTEXT_MODE_EXTENDED, customContextWindow: 500_000, customContextGpt54: 272_000, customContextGpt54Mini: 400_000, customContextGpt55: 272_000, customContextGpt56: 272_000, contextModels: activeContextModels, verbosityModels, writable: true },
+    value: { autoQuotaRetry: false, quickQuotaMode: QUICK_QUOTA_MODE_BAR, searchProvider: 'dsh', speedMode: SPEED_MODE_FAST, outputVerbosity: OUTPUT_VERBOSITY_DEFAULT, contextMode: CONTEXT_MODE_EXTENDED, customContextWindow: 500_000, customContextGpt54: 272_000, customContextGpt54Mini: 400_000, customContextGpt55: 272_000, customContextGpt56: 272_000, contextModels: activeContextModels, verbosityModels, writable: true },
   })
   assert.deepEqual(host.webUpdates.at(-1), {
     config: { searchProvider: 'deepseek-official', fetchProvider: 'local' },
@@ -321,6 +328,18 @@ test('plugin registers one Codex route, subscription image tool, and DSH-trusted
     ok: false,
     error: { code: 'internal', message: 'Invalid quick quota preference', details: { issues: [] } },
   })
+  const invalidAutoRetry = await host.handled[0].handler('preferences/update', {
+    [AUTO_QUOTA_RETRY_FIELD]: 'yes',
+  }, signal)
+  assert.deepEqual(invalidAutoRetry, {
+    ok: false,
+    error: { code: 'internal', message: 'Invalid automatic quota retry preference', details: { issues: [] } },
+  })
+  assert.equal(await host.listeners[0].listener({
+    provider: 'openai-codex',
+    failure: { code: 'RATE_LIMIT' },
+    signal,
+  }, async () => downstream), downstream, 'disabled recovery must preserve the terminal path without reading quota')
 })
 
 test('usage failures use a DSH-supported bounded RPC error', async () => {
@@ -335,6 +354,30 @@ test('usage failures use a DSH-supported bounded RPC error', async () => {
     error: { code: 'internal', message: 'Could not read ChatGPT usage', details: { issues: [] } },
   })
   assert.doesNotMatch(JSON.stringify(result), /host secret/)
+})
+
+test('successful account selection wakes parked quota recovery only after the account changes', async () => {
+  let selected = 0
+  let wakeups = 0
+  const handler = plugin.createSubscriptionRpcHandler({
+    authHandler: async endpoint => endpoint === 'account/select'
+      ? { ok: true, value: { authenticated: true } }
+      : { ok: false, error: { code: 'failed' } },
+    usageReader: { clearCache() {} },
+    resetCreditService: { clear() {} },
+    modelCatalog: { clear() {}, async refresh() {} },
+    onAccountSelected() { wakeups += 1 },
+  })
+  const signal = new AbortController().signal
+
+  const success = await handler('account/select', { id: 'next' }, signal)
+  selected += success.ok === true ? 1 : 0
+  assert.equal(selected, 1)
+  assert.equal(wakeups, 1)
+
+  const failed = await handler('account/select-failed', { id: 'next' }, signal)
+  assert.equal(failed.ok, false)
+  assert.equal(wakeups, 1)
 })
 
 test('original image RPC delegates only a bounded session-owned chunk request', async () => {

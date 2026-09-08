@@ -6,6 +6,8 @@ export const QUICK_QUOTA_MODE_PERCENT = 'percent'
 export const QUICK_QUOTA_MODE_BAR = 'bar'
 export const QUICK_QUOTA_MODE_FORECAST = 'forecast'
 export const DEFAULT_QUICK_QUOTA_MODE = QUICK_QUOTA_MODE_OFF
+export const AUTO_QUOTA_RETRY_FIELD = 'autoQuotaRetry'
+export const DEFAULT_AUTO_QUOTA_RETRY = true
 export const SEARCH_PROVIDER_FIELD = 'searchProvider'
 export const SEARCH_PROVIDER_AUTO = 'auto'
 export const SEARCH_PROVIDER_DSH = 'dsh'
@@ -48,6 +50,8 @@ export const CUSTOM_CONTEXT_MODEL_DEFAULTS = Object.freeze({
   'gpt-5.5': 272_000,
   'gpt-5.6': 272_000,
 })
+
+export const normalizeAutoQuotaRetry = value => typeof value === 'boolean' ? value : DEFAULT_AUTO_QUOTA_RETRY
 
 export const normalizeSearchProvider = value => [SEARCH_PROVIDER_AUTO, SEARCH_PROVIDER_DSH, SEARCH_PROVIDER_CODEX].includes(value)
   ? value

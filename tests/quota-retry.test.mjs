@@ -38,7 +38,7 @@ test('recoverable short Codex quota waits through reset then retries without del
     usageReader,
     now: () => nowMs,
     wait: async (delayMs, waitSignal) => {
-      waits.push({ delayMs, signal: waitSignal })
+      waits.push({ delayMs, aborted: waitSignal.aborted })
       return true
     },
   })
@@ -50,7 +50,7 @@ test('recoverable short Codex quota waits through reset then retries without del
 
   assert.deepEqual(result, { kind: 'retry' })
   assert.deepEqual(reads, [{ force: true, signal }])
-  assert.deepEqual(waits, [{ delayMs: 70_000, signal }])
+  assert.deepEqual(waits, [{ delayMs: 70_000, aborted: false }])
   assert.equal(clears, 1)
   assert.equal(delegated, 0)
 })
@@ -317,6 +317,93 @@ test('cache cleanup failures do not suppress retry after the completed wait', as
   })
 
   assert.deepEqual(await handler(payload(), async () => undefined), { kind: 'retry' })
+})
+
+test('disabled automatic recovery delegates without reading quota', async () => {
+  let reads = 0
+  const handler = createHandler({
+    enabled: () => false,
+    usageReader: {
+      async read() { reads += 1; return { rateLimits: [] } },
+    },
+  })
+  const sentinel = { kind: 'downstream' }
+
+  assert.equal(await handler(payload(), async () => sentinel), sentinel)
+  assert.equal(reads, 0)
+})
+
+test('switching accounts wakes a parked recovery and retries immediately', async () => {
+  const nowMs = 1_000_000
+  let waitStartedResolve
+  const waitStarted = new Promise(resolve => { waitStartedResolve = resolve })
+  let clears = 0
+  let delegated = 0
+  const handler = createHandler({
+    now: () => nowMs,
+    usageReader: {
+      async read() {
+        return {
+          rateLimits: [{
+            id: 'codex',
+            windows: [{ usedPercent: 100, windowSeconds: 18_000, resetsAt: (nowMs + 60_000) / 1_000 }],
+          }],
+        }
+      },
+      clearCache() { clears += 1 },
+    },
+    wait: async (_delayMs, waitSignal) => {
+      waitStartedResolve()
+      return await new Promise(resolve => waitSignal.addEventListener('abort', () => resolve(false), { once: true }))
+    },
+  })
+
+  const result = handler(payload(), async () => {
+    delegated += 1
+    return { kind: 'downstream' }
+  })
+  await waitStarted
+  handler.notifyAccountChanged()
+
+  assert.deepEqual(await result, { kind: 'retry' })
+  assert.equal(clears, 1)
+  assert.equal(delegated, 0)
+})
+
+test('turning automatic recovery off wakes parked turns and preserves the terminal path', async () => {
+  const nowMs = 1_000_000
+  let enabled = true
+  let waitStartedResolve
+  const waitStarted = new Promise(resolve => { waitStartedResolve = resolve })
+  let clears = 0
+  const sentinel = { kind: 'downstream' }
+  const handler = createHandler({
+    enabled: () => enabled,
+    now: () => nowMs,
+    usageReader: {
+      async read() {
+        return {
+          rateLimits: [{
+            id: 'codex',
+            windows: [{ usedPercent: 100, windowSeconds: 18_000, resetsAt: (nowMs + 60_000) / 1_000 }],
+          }],
+        }
+      },
+      clearCache() { clears += 1 },
+    },
+    wait: async (_delayMs, waitSignal) => {
+      waitStartedResolve()
+      return await new Promise(resolve => waitSignal.addEventListener('abort', () => resolve(false), { once: true }))
+    },
+  })
+
+  const result = handler(payload(), async () => sentinel)
+  await waitStarted
+  enabled = false
+  handler.notifyConfigurationChanged()
+
+  assert.equal(await result, sentinel)
+  assert.equal(clears, 0)
 })
 
 test('cancellation during a parked quota wait suppresses the retry', async () => {

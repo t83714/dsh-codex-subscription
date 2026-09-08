@@ -7,6 +7,7 @@ import { SubscriptionImageViewerOverlay } from './subscription-image-viewer.jsx'
 import { SUBSCRIPTION_IMAGE_VIEWER_CSS } from './subscription-image-viewer-styles.js'
 import { SubscriptionImageViewerService } from './subscription-image-viewer.js'
 import {
+  AUTO_QUOTA_RETRY_FIELD,
   CONTEXT_MODE_CUSTOM,
   CONTEXT_MODE_EXTENDED,
   CONTEXT_MODE_FIELD,
@@ -77,6 +78,7 @@ const zh = {
   searchDsh: 'DSH 默认', searchDshHint: '所有模型使用 DSH 当前搜索服务',
   searchCodex: 'Codex 订阅', searchCodexHint: '所有模型通过已登录的 ChatGPT 订阅搜索',
   preferenceFailed: '设置未保存。', preferenceRetry: '重试',
+  autoQuotaRetry: '额度重置后自动重试', autoQuotaRetryHint: '短时额度用尽后等待重置；等待期间切换账号会立即重试。',
   usage: '订阅额度',
   refresh: '刷新', refreshing: '刷新中…', noUsage: '登录后可读取 ChatGPT 返回的额度窗口。',
   usageLoading: '正在读取额度…', usageEmpty: '当前账户没有返回可显示的额度窗口。请稍后刷新；这不代表额度为零。',
@@ -139,6 +141,7 @@ const en = {
   searchDsh: 'DSH default', searchDshHint: 'Use DSH\'s current search service for every model',
   searchCodex: 'Codex subscription', searchCodexHint: 'Search through the signed-in ChatGPT subscription for every model',
   preferenceFailed: 'The setting was not saved.', preferenceRetry: 'Retry',
+  autoQuotaRetry: 'Retry after quota reset', autoQuotaRetryHint: 'Wait for short quota resets; switching accounts while waiting retries immediately.',
   usage: 'Subscription quota',
   refresh: 'Refresh', refreshing: 'Refreshing…', noUsage: 'Sign in to read quota windows reported by ChatGPT.',
   usageLoading: 'Reading quota…', usageEmpty: 'This account returned no displayable quota windows. Refresh later; this does not mean zero quota.',
@@ -465,6 +468,15 @@ function useQuickQuota(rpc, enabled, model) {
   return quota
 }
 
+function AutoQuotaRetryPreference({ preference, t }) {
+  const snapshot = usePreferenceSnapshot(preference)
+  const writable = snapshot.status === 'ready' && snapshot.writable === true
+  return <div className="codexSubscriptionPreference">
+    <div className="codexSubscriptionPreferenceCopy"><span className="codexSubscriptionPreferenceLabel">{t('autoQuotaRetry')}</span><span className="codexSubscriptionPreferenceHint">{t('autoQuotaRetryHint')}</span></div>
+    <button className="codexSubscriptionSwitch" type="button" role="switch" aria-label={t('autoQuotaRetry')} aria-checked={snapshot.autoQuotaRetry} disabled={!writable} onClick={() => { void preference.set({ [AUTO_QUOTA_RETRY_FIELD]: !snapshot.autoQuotaRetry }) }}><span className="codexSubscriptionSwitchKnob" /></button>
+  </div>
+}
+
 function QuickQuotaPreference({ preference, t }) {
   const snapshot = usePreferenceSnapshot(preference)
   const writable = snapshot.status === 'ready' && snapshot.writable === true
@@ -540,6 +552,8 @@ function PreferencesCard({ preference, t }) {
     <ContextWindowPreference preference={preference} t={t} />
     <div className="codexSubscriptionDivider" />
     <QuickQuotaPreference preference={preference} t={t} />
+    <div className="codexSubscriptionDivider" />
+    <AutoQuotaRetryPreference preference={preference} t={t} />
     {snapshot.error ? <div className="codexSubscriptionRecover" role="alert"><p className="codexSubscriptionError">{t('preferenceFailed')}</p><Button type="button" variant="outline" onClick={() => { void preference.retry() }}>{t('preferenceRetry')}</Button></div> : null}
   </div>
 }

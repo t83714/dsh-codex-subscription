@@ -26,6 +26,33 @@ function cancellableDelay(delayMs, signal) {
   })
 }
 
+function createWakeSignal() {
+  let revision = 0
+  let reason
+  const waiters = new Set()
+  const notify = nextReason => {
+    revision += 1
+    reason = nextReason
+    for (const waiter of [...waiters]) waiter(nextReason)
+  }
+  const wait = (since, signal) => {
+    if (revision !== since) return Promise.resolve(reason)
+    if (signal?.aborted) return Promise.resolve('cancelled')
+    return new Promise(resolve => {
+      const settle = value => {
+        waiters.delete(settle)
+        signal?.removeEventListener('abort', onAbort)
+        resolve(value)
+      }
+      const onAbort = () => settle('cancelled')
+      waiters.add(settle)
+      signal?.addEventListener('abort', onAbort, { once: true })
+      if (revision !== since) settle(reason)
+    })
+  }
+  return { revision: () => revision, notify, wait }
+}
+
 function shortResetDelay(usage, nowMs, maxWaitMs, resetMarginMs) {
   const delays = []
   for (const limit of usage?.rateLimits ?? []) {
@@ -45,6 +72,18 @@ function shortResetDelay(usage, nowMs, maxWaitMs, resetMarginMs) {
   return delays.length === 0 ? undefined : Math.min(...delays)
 }
 
+async function waitForResetOrWake(delayMs, signal, wait, wakeSignal, revision) {
+  const controller = new AbortController()
+  const fusedSignal = signal === undefined
+    ? controller.signal
+    : AbortSignal.any([signal, controller.signal])
+  const delayed = Promise.resolve(wait(delayMs, fusedSignal))
+    .then(completed => completed ? 'reset' : 'cancelled')
+  const result = await Promise.race([delayed, wakeSignal.wait(revision, fusedSignal)])
+  controller.abort()
+  return result
+}
+
 /**
  * Recover a Codex subscription RATE_LIMIT only when the backend confirms an
  * exhausted short quota window whose reset is close enough to wait out.
@@ -56,6 +95,7 @@ function shortResetDelay(usage, nowMs, maxWaitMs, resetMarginMs) {
 export function createCodexQuotaRetryHandler({
   usageReader,
   provider = 'openai-codex',
+  enabled = () => true,
   now = Date.now,
   wait = cancellableDelay,
   maxWaitMs = DEFAULT_MAX_WAIT_MS,
@@ -64,16 +104,27 @@ export function createCodexQuotaRetryHandler({
   if (usageReader === undefined || typeof usageReader.read !== 'function') {
     throw new TypeError('quota retry requires a usage reader')
   }
-  if (typeof now !== 'function' || typeof wait !== 'function') {
-    throw new TypeError('quota retry requires clock and wait functions')
+  if (typeof enabled !== 'function' || typeof now !== 'function' || typeof wait !== 'function') {
+    throw new TypeError('quota retry requires enablement, clock, and wait functions')
   }
   if (!Number.isFinite(maxWaitMs) || maxWaitMs <= 0
     || !Number.isFinite(resetMarginMs) || resetMarginMs < 0) {
     throw new TypeError('quota retry requires a positive wait cap and non-negative reset margin')
   }
-  return async ({ provider: requestProvider, failure, signal }, next) => {
-    if (requestProvider !== provider || !isCodexRateLimit(failure)) return next()
+  const wakeSignal = createWakeSignal()
+  const clearCache = async () => {
+    try {
+      if (typeof usageReader.clearCache === 'function') await usageReader.clearCache()
+      else await usageReader.clear?.()
+    } catch {
+      // Cache invalidation must not turn a completed quota wait into a new
+      // terminal failure. The next forced usage read can repair stale UI state.
+    }
+  }
+  const handler = async ({ provider: requestProvider, failure, signal }, next) => {
+    if (requestProvider !== provider || !isCodexRateLimit(failure) || !enabled()) return next()
     if (signal?.aborted) return undefined
+    let wakeRevision = wakeSignal.revision()
 
     let usage
     try {
@@ -83,19 +134,32 @@ export function createCodexQuotaRetryHandler({
       return next()
     }
     if (signal?.aborted) return undefined
+    if (!enabled()) return next()
 
-    const resetDelayMs = shortResetDelay(usage, now(), maxWaitMs, resetMarginMs)
+    let resetDelayMs = shortResetDelay(usage, now(), maxWaitMs, resetMarginMs)
     if (resetDelayMs === undefined) return next()
-    if (!await wait(resetDelayMs + resetMarginMs, signal)) return undefined
-    if (signal?.aborted) return undefined
-
-    try {
-      if (typeof usageReader.clearCache === 'function') await usageReader.clearCache()
-      else await usageReader.clear?.()
-    } catch {
-      // Cache invalidation must not turn a completed quota wait into a new
-      // terminal failure. The next forced usage read can repair stale UI state.
+    while (true) {
+      const reason = await waitForResetOrWake(
+        resetDelayMs + resetMarginMs,
+        signal,
+        wait,
+        wakeSignal,
+        wakeRevision,
+      )
+      if (reason === 'cancelled' || signal?.aborted) return undefined
+      if (!enabled()) return next()
+      if (reason !== 'configuration') break
+      wakeRevision = wakeSignal.revision()
+      resetDelayMs = shortResetDelay(usage, now(), maxWaitMs, resetMarginMs)
+      if (resetDelayMs === undefined) return next()
     }
+
+    await clearCache()
     return { kind: 'retry' }
   }
+  Object.defineProperties(handler, {
+    notifyAccountChanged: { value: () => wakeSignal.notify('account') },
+    notifyConfigurationChanged: { value: () => wakeSignal.notify('configuration') },
+  })
+  return handler
 }
