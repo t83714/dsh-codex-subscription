@@ -528,10 +528,20 @@ export function apply(ctx) {
     void modelCatalog.refresh().catch(error => ctx.logger?.debug?.('could not refresh Codex model catalog: %s', error.message))
   }, 'codex-subscription: official model catalog')
 
-  ctx.inject(['connection'], connectionContext => connectionContext.effect(
-    () => connectionContext.connection.rpc.handle(CHANNEL, handler, { authority: 'trusted-host' }),
-    'codex-subscription: DSH-trusted account RPC',
-  ))
+  ctx.inject(['connection', 'webServer'], webContext => {
+    const connection = webContext.connection
+    // DSH 0.1.5's rpc.handle() mounts through the Connection plugin's context,
+    // which no longer injects webServer, so third-party channels silently remain
+    // unregistered and every browser call receives HTTP 405. Passing the
+    // webServer-injected caller context to register() works on both 0.1.2 and
+    // 0.1.5 while retaining caller-owned route cleanup. Fall back to the public
+    // API once Connection no longer exposes the compatibility seam.
+    if (typeof connection.register === 'function') {
+      connection.register(webContext, CHANNEL, handler)
+      return
+    }
+    connection.rpc.handle(CHANNEL, handler)
+  })
 }
 
 export { createCodexAuthService, DshOAuthCredentialStore } from './credential-store.js'

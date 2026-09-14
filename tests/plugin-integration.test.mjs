@@ -83,7 +83,7 @@ test('custom context rows follow the active upstream model catalog', () => {
   ])
 })
 
-function fakeContext({ connection = true } = {}) {
+function fakeContext({ connection = true, directConnectionRegister = true } = {}) {
   const registered = []
   const handled = []
   const listeners = []
@@ -141,13 +141,20 @@ function fakeContext({ connection = true } = {}) {
       },
     },
     connection: connection ? {
+      ...(directConnectionRegister ? {
+        register(owner, channel, handler) {
+          handled.push({ owner, channel, handler, transport: 'caller-owned' })
+          return () => {}
+        },
+      } : {}),
       rpc: {
-        handle(channel, handler, options) {
-          handled.push({ channel, handler, options })
+        handle(channel, handler) {
+          handled.push({ channel, handler, transport: 'public' })
           return () => {}
         },
       },
     } : undefined,
+    webServer: {},
     settings: {
       writable: true,
       register(namespace, schema) {
@@ -202,6 +209,16 @@ test('plugin activates without the web connection service in Headless mode', () 
   assert.equal(host.handled.length, 0)
 })
 
+test('plugin falls back to the public RPC registration API when the compatibility seam is unavailable', () => {
+  const host = fakeContext({ directConnectionRegister: false })
+
+  applyPlugin(host.ctx)
+
+  assert.equal(host.handled.length, 1)
+  assert.equal(host.handled[0].channel, '/codex-subscription')
+  assert.equal(host.handled[0].transport, 'public')
+})
+
 test('plugin registers one Codex route, subscription image tool, and DSH-trusted redacted RPC', async () => {
   const host = fakeContext()
   applyPlugin(host.ctx)
@@ -239,7 +256,8 @@ test('plugin registers one Codex route, subscription image tool, and DSH-trusted
   await host.updateSettings({ [CONTEXT_MODE_FIELD]: CONTEXT_MODE_STANDARD, [CUSTOM_CONTEXT_WINDOW_FIELD]: 272_000, customContextGpt54: 272_000, customContextGpt54Mini: 272_000, customContextGpt55: 272_000, customContextGpt56: 272_000 })
   assert.equal(host.handled.length, 1)
   assert.equal(host.handled[0].channel, '/codex-subscription')
-  assert.deepEqual(host.handled[0].options, { authority: 'trusted-host' })
+  assert.equal(host.handled[0].transport, 'caller-owned')
+  assert.equal(host.handled[0].owner, host.ctx, 'the route owner must inject webServer for DSH 0.1.5')
   assert.equal(host.settings.length, 1)
   assert.equal(host.provided.size, 0, 'the plugin should not publish undocumented host services')
   assert.equal('CodexCacheTelemetry' in plugin, false, 'cache diagnostics are outside the subscription route boundary')

@@ -83,6 +83,8 @@ test('composer quota modes use the public composer slot before the model selecto
   assert.match(host, /settings\.watch/u)
   assert.match(host, /preferences\/status/u)
   assert.match(host, /preferences\/update/u)
+  assert.match(host, /ctx\.inject\(\[['"]connection['"], ['"]webServer['"]\]/u)
+  assert.match(host, /connection\.register\(webContext, CHANNEL, handler\)/u)
   assert.match(host, /QUICK_QUOTA_MODE_FIELD/u)
   assert.match(host, /notifyAccountChanged/u)
   assert.match(host, /notifyConfigurationChanged/u)
