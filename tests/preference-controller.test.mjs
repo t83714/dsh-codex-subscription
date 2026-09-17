@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { createPreferenceController } from '../src/preference-controller.js'
-import { CONTEXT_MODE_EXTENDED, CONTEXT_MODE_FIELD, CONTEXT_MODE_STANDARD } from '../src/settings-contract.js'
+import { AUTO_QUOTA_RETRY_FIELD, CONTEXT_MODE_EXTENDED, CONTEXT_MODE_FIELD, CONTEXT_MODE_STANDARD } from '../src/settings-contract.js'
 
 function harness({ fail = false } = {}) {
   let native = {
@@ -40,6 +40,17 @@ function harness({ fail = false } = {}) {
   const rpc = { call: async () => ({ ok: true, value: native.value }) }
   return { controller: createPreferenceController(scope, rpc), settle: () => settle?.() }
 }
+
+test('automatic quota retry defaults on and can be disabled', async () => {
+  const { controller, settle } = harness()
+  assert.equal(controller.getSnapshot().autoQuotaRetry, true)
+
+  const pending = controller.set({ [AUTO_QUOTA_RETRY_FIELD]: false })
+  assert.equal(controller.getSnapshot().autoQuotaRetry, false)
+  settle()
+  await pending
+  assert.equal(controller.getSnapshot().autoQuotaRetry, false)
+})
 
 test('preference save reflects the chosen value while keeping ready surfaces mounted', async () => {
   const { controller, settle } = harness()

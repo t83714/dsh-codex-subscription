@@ -46,6 +46,7 @@ export async function createSubscriptionDiagnostics({ auth, preferences, login =
     login,
     requests: safeRequests(network),
     configuration: {
+      ...(typeof preference.autoQuotaRetry === 'boolean' ? { autoQuotaRetry: preference.autoQuotaRetry } : {}),
       contextMode: preference.contextMode,
       quickQuotaMode: preference.quickQuotaMode,
       ...(typeof preference.outputVerbosity === 'string' ? { outputVerbosity: preference.outputVerbosity } : {}),
